@@ -234,3 +234,4 @@ if "history" in st.session_state:
             st.markdown(f"**🤖 챗봇:** {turn['content']}")
 else:
     st.write("아직 대화가 없어요 🙇")
+
