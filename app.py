@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# 우리 파이프라인 유틸 함수 가져오기
+# rag_pipeline에서 함수들 가져오기
 from rag_pipeline import (
     load_docs,
     split_docs,
@@ -16,11 +16,9 @@ from rag_pipeline import (
     make_qa_chain,
 )
 
-########################################
-# 0. 페이지 기본 설정
-########################################
+# ---------- 페이지 설정 ----------
 st.set_page_config(
-    page_title="나만의 RAG 챗봇",
+    page_title="나만의 회계 튜터",
     page_icon="📚",
     layout="wide",
 )
@@ -36,65 +34,97 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown("## 📚 나만의 RAG 챗봇")
-st.write("내가 넣은 문서(docs 폴더) + 회계원리 개념 정리(csv)를 기반으로 답해주는 검색+생성(QA) 봇입니다.\n또한 객관식/서술식 퀴즈도 출제합니다.")
+st.title("📚 나만의 회계 RAG + 퀴즈 챗봇")
+st.write("내가 넣은 강의자료(docs 폴더)와 문제은행(data/accounting_bank_full.csv)을 바탕으로 공부 도와주는 개인 튜터예요.")
 
 
-########################################
-# 1. 벡터스토어 준비 (없으면 생성)
-########################################
+# =====================================
+# 1. 벡터스토어 관리 (RAG용 지식 인덱스)
+# =====================================
+
 VSTORE_PATH = "vectorstore"
 DOCS_PATH = "docs"
 
-# 벡터스토어 로드 또는 생성
-def get_vectorstore():
-    # 이미 저장된 벡터 DB가 있으면 그대로 불러오기
-    if os.path.isdir(VSTORE_PATH):
-        try:
-            vectordb = load_vectorstore(VSTORE_PATH)
-            return vectordb
-        except Exception as e:
-            st.warning(f"기존 vectorstore 로드 중 오류: {e}")
+# 전역 상태에 vectordb와 qa_fn을 저장해서 재사용하자
+if "vectordb" not in st.session_state:
+    st.session_state["vectordb"] = None
+if "qa_fn" not in st.session_state:
+    st.session_state["qa_fn"] = None
+if "build_error" not in st.session_state:
+    st.session_state["build_error"] = None
 
-    # 없거나 깨졌으면 새로 만든다
-    docs = load_docs(DOCS_PATH)
-    chunks = split_docs(docs)
 
-    if len(chunks) == 0:
-        st.error("❌ docs 폴더에서 불러온 문서가 없습니다.\n'./docs' 폴더에 회계 요약본, 교재 요약 txt/PDF 등을 넣어주세요.")
-        return None
-
+def try_load_vectorstore():
+    """이미 있는 vectorstore를 불러오거나 없으면 None."""
     try:
-        vectordb = build_vectorstore(chunks, save_path=VSTORE_PATH)
+        vectordb = load_vectorstore(VSTORE_PATH)
         return vectordb
     except Exception as e:
-        st.error(f"벡터스토어 생성 중 오류 발생: {e}")
         return None
 
 
-vectordb = get_vectorstore()
-qa_fn = make_qa_chain(vectordb) if vectordb else None
-
-
-########################################
-# 2. 사이드바: 퀴즈 모드 설명
-########################################
-st.sidebar.markdown("### ✍ 퀴즈 모드")
-st.sidebar.write(
+def rebuild_vectorstore():
     """
-    - 아래 버튼을 누르면 랜덤 회계 기초 문제를 냅니다.  
-    - 객관식/서술형 모두 나올 수 있어요.  
-    - 정답/해설도 확인 가능합니다.
+    docs 폴더에서 pdf/txt를 읽고
+    -> chunk로 쪼개고
+    -> 새 vectorstore를 만든다.
+    실패하면 에러 메시지 저장.
     """
-)
+    try:
+        docs = load_docs(DOCS_PATH)  # pdf / txt 읽기
+        chunks = split_docs(docs)    # 조각내기
 
-########################################
-# 3. 채팅(QA) 영역
-########################################
-st.markdown("### 💬 질문을 입력하세요:")
+        if len(chunks) == 0:
+            raise ValueError(
+                "docs 폴더에서 불러온 문서가 0개예요.\n"
+                "docs 폴더 안에 회계 강의 pdf/txt 파일을 넣어주세요."
+            )
+
+        vectordb = build_vectorstore(chunks, save_path=VSTORE_PATH)
+        st.session_state["vectordb"] = vectordb
+        st.session_state["qa_fn"] = make_qa_chain(vectordb)
+        st.session_state["build_error"] = None
+        st.success("✅ 벡터스토어 생성 완료!")
+    except Exception as e:
+        st.session_state["build_error"] = str(e)
+        st.session_state["vectordb"] = None
+        st.session_state["qa_fn"] = None
+        st.error(f"벡터스토어 생성 실패: {e}")
+
+
+# 앱이 처음 켜질 때 시도: 이미 있는 vectorstore 불러오기
+if st.session_state["vectordb"] is None:
+    st.session_state["vectordb"] = try_load_vectorstore()
+    if st.session_state["vectordb"] is not None:
+        st.session_state["qa_fn"] = make_qa_chain(st.session_state["vectordb"])
+
+
+# ----------------- 사이드바 -----------------
+st.sidebar.markdown("### ⚙️ 세팅 / 인덱스 관리")
+
+if st.sidebar.button("📂 벡터DB (재)생성하기"):
+    rebuild_vectorstore()
+
+if st.session_state["vectordb"] is None:
+    st.sidebar.warning(
+        "❗ 아직 벡터스토어가 없거나 로드 실패했어요.\n"
+        "먼저 '벡터DB (재)생성하기'를 눌러 주세요."
+    )
+else:
+    st.sidebar.success("✅ 벡터스토어 준비됨!")
+
+if st.session_state["build_error"]:
+    st.sidebar.code(st.session_state["build_error"], language="text")
+
+
+# =====================================
+# 2. 질문 → 답변 (RAG 질의응답)
+# =====================================
+
+st.markdown("## 💬 회계 질문해 보세요")
 
 user_q = st.text_input(
-    "예: '자산이 뭐에요?', '기본 회계 등식 다시 설명해줘', '복식부기 왜 필요한가요?' 등",
+    "예: '자산이 뭐예요?', '발생주의 회계 쉽게 설명해줘', '선급비용은 왜 자산이에요?' 등",
     key="question_input",
 )
 
@@ -103,28 +133,38 @@ ask_button = st.button("질문하기")
 if ask_button:
     if not user_q.strip():
         st.warning("질문을 입력해 주세요.")
-    elif qa_fn is None:
-        st.error("QA 엔진이 준비되지 않았습니다. docs 폴더와 vectorstore를 확인하세요.")
+    elif st.session_state["qa_fn"] is None:
+        st.error("아직 QA 엔진이 준비가 안 됐어요. 왼쪽에서 벡터DB 먼저 만들거나 로드해 주세요.")
     else:
         with st.spinner("답변 생성 중..."):
-            answer_text = qa_fn(user_q)
+            answer_text = st.session_state["qa_fn"](user_q)
+
         st.markdown("#### 📌 답변")
         st.write(answer_text)
 
+        # 대화 히스토리 저장
+        if "history" not in st.session_state:
+            st.session_state["history"] = []
+        st.session_state["history"].append({"role": "user", "content": user_q})
+        st.session_state["history"].append({"role": "assistant", "content": answer_text})
 
-########################################
-# 4. 회계 퀴즈 영역
-########################################
+
+# =====================================
+# 3. 회계 퀴즈 모드
+# =====================================
+
 st.markdown("---")
-st.markdown("### 📝 회계원리 퀴즈")
+st.markdown("## 📝 회계원리 퀴즈")
 
-# CSV 불러오기
 @st.cache_data
-def load_question_bank(csv_path="data/accounting_bank.csv"):
+def load_question_bank(csv_path="data/accounting_bank_full.csv"):
     if not os.path.exists(csv_path):
         return None
-    df = pd.read_csv(csv_path)
-    return df
+    try:
+        df = pd.read_csv(csv_path)
+        return df
+    except Exception as e:
+        return None
 
 bank_df = load_question_bank()
 
@@ -136,16 +176,16 @@ with col_left:
 
 with col_right:
     difficulty_choice = st.selectbox(
-        "난이도 선택(선택 시 가중 랜덤):",
+        "난이도 선택(선택 시 난이도에 맞춰 랜덤):",
         ["전체", "easy", "medium", "hard"],
         index=0,
     )
 
 if bank_df is None:
-    st.error("❌ data/accounting_bank.csv 파일을 찾을 수 없습니다. 먼저 CSV를 생성/배치해 주세요.")
+    st.error("❌ data/accounting_bank_full.csv 파일을 찾을 수 없어요. GitHub /data 에 있는 csv를 로컬 data 폴더에도 넣어주세요.")
 else:
     if quiz_btn:
-        # 난이도에 따라 필터링
+        # 난이도 필터
         if difficulty_choice == "전체":
             pool_df = bank_df
         else:
@@ -156,53 +196,41 @@ else:
         else:
             row = pool_df.sample(1).iloc[0]
 
-            topic = row["topic"]
-            question = row["question"]
-            choices_raw = str(row["choices"]) if "choices" in row else ""
-            answer = row["answer"]
-            explanation = row["explanation"]
+            week = row.get("week", "N/A")
+            topic = row.get("topic", "")
+            question = row.get("question", "")
+            choices_raw = str(row.get("choices", ""))
+            answer = row.get("answer", "")
+            explanation = row.get("explanation", "")
 
-            st.markdown("#### 🎯 주제(Topic)")
-            st.write(topic)
-
-            st.markdown("#### ❓ 문제")
+            st.markdown(f"**📚 주차:** {week}주차  /  **주제:** {topic}")
+            st.markdown("**❓ 문제**")
             st.write(question)
 
-            # 객관식인 경우 보기 출력
             if isinstance(choices_raw, str) and choices_raw.strip() != "" and choices_raw.lower() != "nan":
                 st.markdown("**보기**")
-                # choices는 "A. ...|B. ...|C. ..." 형태 → 줄바꿈으로 보여주기
                 for choice in choices_raw.split("|"):
                     st.write("- " + choice.strip())
 
-            # 정답/해설은 토글로 숨겼다가 보여주기
             with st.expander("✅ 정답 보기 / 해설 보기"):
                 st.markdown("**정답:**")
                 st.write(answer)
                 st.markdown("**해설:**")
                 st.write(explanation)
 
-########################################
-# 5. 대화 기록 레이아웃(옵션)
-########################################
+
+# =====================================
+# 4. 대화 기록
+# =====================================
+
 st.markdown("---")
-st.markdown("### 💬 대화 기록")
+st.markdown("## 💬 대화 기록")
 
-if "history" not in st.session_state:
-    st.session_state["history"] = []
-
-# 새 질문 & 답변을 기록하자
-if ask_button and user_q.strip() and qa_fn is not None:
-    st.session_state["history"].append(
-        {"role": "user", "content": user_q}
-    )
-    st.session_state["history"].append(
-        {"role": "assistant", "content": answer_text}
-    )
-
-# 화면에 출력
-for turn in st.session_state["history"]:
-    if turn["role"] == "user":
-        st.markdown(f"**🙋 사용자:** {turn['content']}")
-    else:
-        st.markdown(f"**🤖 챗봇:** {turn['content']}")
+if "history" in st.session_state:
+    for turn in st.session_state["history"]:
+        if turn["role"] == "user":
+            st.markdown(f"**🙋 사용자:** {turn['content']}")
+        else:
+            st.markdown(f"**🤖 챗봇:** {turn['content']}")
+else:
+    st.write("아직 대화가 없어요 🙇")
